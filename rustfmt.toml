@@ -1,0 +1,6 @@
+reorder_imports = true
+
+# Consistent formatting across the workspace
+use_field_init_shorthand = true
+use_small_heuristics = "Max"
+newline_style = "Unix"

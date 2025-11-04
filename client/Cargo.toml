@@ -1,0 +1,13 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+wtransport  = { version = "0.6.1", features = ["dangerous-configuration"] }
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1.37"
+image = "0.25.8"
+openh264= "0.9"
