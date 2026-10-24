@@ -1,0 +1,38 @@
+# ---- Rust / Cargo ----
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+
+# Cargo local caches (if present in repo)
+.cargo/registry/
+.cargo/git/
+
+# Coverage / profiling outputs
+coverage/
+htmlcov/
+*.lcov
+flamegraph.svg
+perf.data*
+perf-*.map
+
+# ---- Editors / IDEs ----
+.idea/
+.vscode/
+*.iml
+
+# ---- OS files ----
+.DS_Store
+Thumbs.db
+
+# ---- Logs / temp ----
+*.log
+*.swp
+*.swo
+*~
+
+# ---- Client output frames ----
+/images/
+/client/images/
+

@@ -14,16 +14,20 @@ Why WebTransport:
 - Client:
   - Receives datagrams via WebTransport
   - Performs bounded, loss-aware reassembly of fragmented frames
-  - Decodes H.264 frames and writes images to `images/`
+  - Decodes H.264 frames and displays them in a native window
 
 ## Status
-- Works end‑to‑end on Linux/X11.
+- Works end‑to‑end on Linux/X11 with a native GUI client.
 - Media transport v1 is implemented in `common/src/protocol/`: fixed 32-byte
   fragment header, negotiated datagram sizing, duplicate/reorder/malformed
   handling, timeouts, memory limits, and a lossy randomized test suite.
-- Capture/encode is still on the async runtime and runs at full display
-  resolution; 720p and a dedicated capture/encode thread are next (M3).
-- Handshake, keyframe requests, and input are still placeholders (M2/M4).
+- Video runs at 1280×720 / 30 fps in a local release build. Capture and
+  encoding run on dedicated threads; the encoder is configured for low-complexity
+  screen content.
+- A new client receives an IDR on connect, and the server refreshes it every
+  60 frames. There is no explicit client keyframe request yet.
+- The control stream is still the `"HELLO"` placeholder; typed handshake,
+  keyframe requests, pacing, and input are next (M2/M4).
 - See [`docs/protocol.md`](docs/protocol.md) for the wire format and limits.
 
 ## Build and test
@@ -46,7 +50,12 @@ RUST_LOG=info cargo run --release -p server
 ```bash
 RUST_LOG=info cargo run --release -p client
 ```
-Images will be saved to the `images/` directory.
+The client opens a native window. Press `Esc` or close the window to exit.
 
-A quick local measurement: release build, 2560×1440 X11 capture, ~10 fps.
-The 1280×720 target and moving capture/encode off the async runtime are M3.
+The stream defaults to 1280×720. Override it on the server:
+```bash
+WTR_WIDTH=1920 WTR_HEIGHT=1080 RUST_LOG=info cargo run --release -p server
+```
+
+Measured locally with a 2560×1440 X11 screen: 1280×720, ~30 fps with moving
+content, 0 reassembly rejections, and no decode errors.

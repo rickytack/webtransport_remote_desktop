@@ -1,20 +1,22 @@
 use anyhow::Result;
 use common::protocol::{Fragmenter, Frame, FrameFlags};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc::Receiver, Mutex};
+use tokio::sync::watch;
 use tracing::{debug, error, info, info_span, Instrument};
 use wtransport::endpoint::IncomingSession;
 use wtransport::{Connection, Endpoint, Identity, ServerConfig};
 
 pub struct RemoteDesktopServer {
-    rx: Arc<Mutex<Receiver<Vec<u8>>>>,
+    rx: watch::Receiver<Option<Arc<Frame>>>,
+    force_keyframe: Arc<AtomicBool>,
 }
 
 impl RemoteDesktopServer {
-    pub fn new(rx: Receiver<Vec<u8>>) -> Self {
+    pub fn new(rx: watch::Receiver<Option<Arc<Frame>>>, force_keyframe: Arc<AtomicBool>) -> Self {
         println!("Creating RemoteDesktopServer");
-        Self { rx: Arc::new(Mutex::new(rx)) }
+        Self { rx, force_keyframe }
     }
 
     pub async fn listen_for_connections(self) -> Result<(), Box<dyn std::error::Error>> {
@@ -30,12 +32,15 @@ impl RemoteDesktopServer {
         let mut connection_id = 0u64;
         loop {
             let incoming_session = server.accept().await;
-            let rx_clone = Arc::clone(&self.rx);
+            let rx_clone = self.rx.clone();
+            let force_keyframe = Arc::clone(&self.force_keyframe);
             let id = connection_id;
 
             tokio::spawn(
                 async move {
-                    if let Err(e) = Self::handle_connection(incoming_session, rx_clone).await {
+                    if let Err(e) =
+                        Self::handle_connection(incoming_session, rx_clone, force_keyframe).await
+                    {
                         error!("Connection error: {:?}", e);
                     }
                 }
@@ -48,7 +53,8 @@ impl RemoteDesktopServer {
 
     async fn handle_connection(
         incoming_session: IncomingSession,
-        rx: Arc<Mutex<Receiver<Vec<u8>>>>,
+        rx: watch::Receiver<Option<Arc<Frame>>>,
+        force_keyframe: Arc<AtomicBool>,
     ) -> Result<()> {
         info!("Waiting for session request...");
         let session_request = incoming_session.await?;
@@ -63,6 +69,10 @@ impl RemoteDesktopServer {
         info!("Waiting for data from client...");
 
         Self::recv_start_conn_data_impl(&connection).await?;
+
+        // Make sure the first frame this client sees is an IDR, not a P-frame
+        // from the middle of the stream.
+        force_keyframe.store(true, Ordering::SeqCst);
 
         // Send datagram to client
         Self::send_videostream_impl(rx, connection).await?;
@@ -86,7 +96,7 @@ impl RemoteDesktopServer {
     }
 
     async fn send_videostream_impl(
-        rx: Arc<Mutex<Receiver<Vec<u8>>>>,
+        mut rx: watch::Receiver<Option<Arc<Frame>>>,
         connection: Connection,
     ) -> Result<()> {
         // The negotiated limit is the maximum application datagram payload,
@@ -102,29 +112,39 @@ impl RemoteDesktopServer {
         );
 
         let mut frame_number: u64 = 0;
+        let mut awaiting_keyframe = true;
         loop {
-            // Lock receiver each time to get next frame.
-            // TODO(M2): replace this shared receiver with a watch channel so
-            // each client gets the latest frame independently.
-            let mut rx_guard = rx.lock().await;
-            let Some(frame_data) = rx_guard.recv().await else {
-                debug!("Frame channel closed; stopping video sender");
+            // Each client owns a watch receiver: a slow client skips frames
+            // instead of stealing them from other clients or blocking capture.
+            if rx.changed().await.is_err() {
+                debug!("Frame publisher closed; stopping video sender");
                 break;
+            }
+
+            let Some(captured) = rx.borrow_and_update().clone() else {
+                continue;
             };
 
-            if frame_data.is_empty() {
-                // The encoder can legally produce no output for a frame (for
-                // example when it skips a frame). There is nothing to send.
+            if captured.is_empty() {
+                // The encoder can legally produce no output for a frame.
                 debug!(frame_number, "Encoder produced an empty frame");
-                frame_number = frame_number.wrapping_add(1);
-                drop(rx_guard);
                 continue;
             }
 
-            let timestamp_us = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_micros() as u64;
-            let frame = Frame::new(frame_number, timestamp_us, FrameFlags::empty(), frame_data);
+            if awaiting_keyframe {
+                if !captured.flags.contains(FrameFlags::KEYFRAME) {
+                    debug!("Skipping P-frame while waiting for the first keyframe");
+                    continue;
+                }
+                awaiting_keyframe = false;
+            }
+
+            let frame = Frame::new(
+                frame_number,
+                captured.timestamp_us,
+                captured.flags,
+                captured.data.clone(),
+            );
             let datagrams = fragmenter.fragment(&frame)?;
             let fragment_count = datagrams.len();
 
@@ -134,9 +154,14 @@ impl RemoteDesktopServer {
                 connection.send_datagram(datagram)?;
             }
 
-            debug!(frame_number, bytes = frame.len(), fragment_count, "Sent video frame");
+            debug!(
+                frame_number,
+                bytes = frame.len(),
+                fragment_count,
+                keyframe = captured.flags.contains(FrameFlags::KEYFRAME),
+                "Sent video frame"
+            );
             frame_number = frame_number.wrapping_add(1);
-            drop(rx_guard);
         }
 
         Ok(())
