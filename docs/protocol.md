@@ -11,16 +11,15 @@ correct.
 ```text
 WebTransport (QUIC)
 ├── datagrams      video frame fragments (kind = 1)
-├── control stream Hello/Welcome, keyframe requests       [partial, M2]
-└── input stream   mouse / keyboard events               [planned, M4]
+└── control stream Hello/Welcome, input events            [partial, M2/M4]
 ```
 
 ## Control stream
 
-The client opens one bidirectional stream and sends a single control frame. The
-first frame must be `Hello`; the server validates it and replies with `Welcome`
-containing the encoded stream size. Video datagrams follow on the same
-connection.
+The client opens one bidirectional stream. The first frame must be `Hello`; the
+server validates it and replies with `Welcome` containing the encoded stream
+size. Video datagrams follow on the same connection, and the client keeps the
+stream open for low-rate input events.
 
 Every control frame has an 8-byte header followed by a bincode payload:
 
@@ -28,7 +27,7 @@ Every control frame has an 8-byte header followed by a bincode payload:
 |---:|---:|---|---|
 | 0 | 4 | magic | `WTRC` |
 | 4 | 1 | version | currently `1` |
-| 5 | 1 | kind | `1` = Hello, `2` = Welcome |
+| 5 | 1 | kind | `1` = Hello, `2` = Welcome, `3` = Input |
 | 6 | 2 | payload_len | little-endian, maximum 65535 |
 | 8 | … | payload | bincode |
 
@@ -36,7 +35,19 @@ The receiver reads the header, checks magic/version/kind, reads exactly
 `payload_len` bytes, and rejects trailing bytes. A version mismatch ends the
 handshake with an error rather than guessing compatibility.
 
-Keyframe requests, statistics, and datagram pacing are still planned for M2.
+## Input events (M4)
+
+Input uses the same control stream after `Welcome`. Pointer coordinates are in
+encoded-stream pixels (0..width-1, 0..height-1); the server scales them to the
+root window before injecting them. The remaining events are:
+
+- pointer move;
+- mouse button press/release (left, middle, right, back, forward);
+- key press/release using the portable `KeyCode` enum;
+- scroll deltas in notches.
+
+Client capture and server XTest injection are the next M4 slices.
+Keyframe requests, statistics, and datagram pacing remain M2 work.
 
 Datagram delivery is unreliable: fragments may be lost, duplicated, reordered,
 or arrive after their frame is no longer useful. The protocol therefore aims

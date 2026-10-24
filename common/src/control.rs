@@ -25,6 +25,7 @@ pub const MAX_CONTROL_PAYLOAD: usize = u16::MAX as usize;
 
 const KIND_HELLO: u8 = 1;
 const KIND_WELCOME: u8 = 2;
+const KIND_INPUT: u8 = 3;
 
 /// Client-to-server handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,11 +41,133 @@ pub struct Welcome {
     pub height: u16,
 }
 
+/// Mouse buttons supported by the first input version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    Back,
+    Forward,
+}
+
+/// Portable key identifiers. The server maps these to X11 keysyms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyCode {
+    Key0,
+    Key1,
+    Key2,
+    Key3,
+    Key4,
+    Key5,
+    Key6,
+    Key7,
+    Key8,
+    Key9,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Escape,
+    Enter,
+    Tab,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Left,
+    Right,
+    Up,
+    Down,
+    Space,
+    Minus,
+    Equal,
+    LeftBracket,
+    RightBracket,
+    Backslash,
+    Semicolon,
+    Apostrophe,
+    Comma,
+    Period,
+    Slash,
+    Backquote,
+    ShiftLeft,
+    ShiftRight,
+    ControlLeft,
+    ControlRight,
+    AltLeft,
+    AltRight,
+    CapsLock,
+    NumLock,
+    ScrollLock,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+/// One low-rate input event sent on the reliable control stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputEvent {
+    /// Pointer position in encoded-stream pixels.
+    PointerMove {
+        x: u16,
+        y: u16,
+    },
+    Button {
+        button: MouseButton,
+        pressed: bool,
+    },
+    Key {
+        key: KeyCode,
+        pressed: bool,
+    },
+    /// Scroll deltas in notches; positive `y` scrolls up.
+    Scroll {
+        dx: i16,
+        dy: i16,
+    },
+}
+
 /// One typed control message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMessage {
     Hello(Hello),
     Welcome(Welcome),
+    Input(InputEvent),
 }
 
 impl ControlMessage {
@@ -52,6 +175,7 @@ impl ControlMessage {
         match self {
             Self::Hello(_) => KIND_HELLO,
             Self::Welcome(_) => KIND_WELCOME,
+            Self::Input(_) => KIND_INPUT,
         }
     }
 
@@ -124,7 +248,7 @@ fn parse_header(frame: &[u8]) -> Result<(u8, usize), ControlError> {
     }
 
     let kind = frame[5];
-    if kind != KIND_HELLO && kind != KIND_WELCOME {
+    if kind != KIND_HELLO && kind != KIND_WELCOME && kind != KIND_INPUT {
         return Err(ControlError::UnknownKind(kind));
     }
 
@@ -181,6 +305,21 @@ mod tests {
         });
         let frame = message.encode().unwrap();
         assert_eq!(ControlMessage::decode(&frame).unwrap(), message);
+    }
+
+    #[test]
+    fn input_events_roundtrip() {
+        let messages = [
+            ControlMessage::Input(InputEvent::PointerMove { x: 1279, y: 719 }),
+            ControlMessage::Input(InputEvent::Button { button: MouseButton::Left, pressed: true }),
+            ControlMessage::Input(InputEvent::Key { key: KeyCode::A, pressed: true }),
+            ControlMessage::Input(InputEvent::Scroll { dx: -3, dy: 2 }),
+        ];
+
+        for message in messages {
+            let frame = message.encode().unwrap();
+            assert_eq!(ControlMessage::decode(&frame).unwrap(), message);
+        }
     }
 
     #[test]
