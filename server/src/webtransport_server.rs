@@ -1,10 +1,9 @@
-use crate::datagram_fragmentor::Fragmentor;
-use crate::remote_protocol::{to_bytes, BaseHeader};
 use anyhow::Result;
+use common::protocol::{Fragmenter, Frame, FrameFlags};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc::Receiver, Mutex};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, Instrument};
 use wtransport::endpoint::IncomingSession;
 use wtransport::{Connection, Endpoint, Identity, ServerConfig};
 
@@ -28,9 +27,11 @@ impl RemoteDesktopServer {
         let server = Endpoint::server(config)?;
         info!("Server ready!");
 
-        for id in 0.. {
+        let mut connection_id = 0u64;
+        loop {
             let incoming_session = server.accept().await;
             let rx_clone = Arc::clone(&self.rx);
+            let id = connection_id;
 
             tokio::spawn(
                 async move {
@@ -38,11 +39,11 @@ impl RemoteDesktopServer {
                         error!("Connection error: {:?}", e);
                     }
                 }
-                .instrument(info_span!("Connection", id = id)),
+                .instrument(info_span!("Connection", id)),
             );
-        }
 
-        Ok(())
+            connection_id = connection_id.wrapping_add(1);
+        }
     }
 
     async fn handle_connection(
@@ -88,33 +89,53 @@ impl RemoteDesktopServer {
         rx: Arc<Mutex<Receiver<Vec<u8>>>>,
         connection: Connection,
     ) -> Result<()> {
-        let mut frame_number_counter: u32 = 0;
+        // The negotiated limit is the maximum application datagram payload,
+        // including our fragment header. Never assume a fixed 1200 bytes.
+        let max_datagram_size = connection
+            .max_datagram_size()
+            .ok_or_else(|| anyhow::anyhow!("peer does not support WebTransport datagrams"))?;
+        let fragmenter = Fragmenter::new(max_datagram_size)?;
+        info!(
+            max_datagram_size,
+            payload_per_fragment = fragmenter.payload_capacity(),
+            "Video datagram sender ready"
+        );
+
+        let mut frame_number: u64 = 0;
         loop {
-            // Lock receiver each time to get next frame
+            // Lock receiver each time to get next frame.
+            // TODO(M2): replace this shared receiver with a watch channel so
+            // each client gets the latest frame independently.
             let mut rx_guard = rx.lock().await;
-            if let Some(frame) = rx_guard.recv().await {
-                println!("Captured frame {} bytes", frame.len());
-
-                // Fragment
-                let base = BaseHeader { channel_id: 1, direction: 1 };
-                let fragmentor = Fragmentor::new(1200);
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_millis() as u64;
-                let packets =
-                    fragmentor.fragment_frame(frame_number_counter, timestamp, base, 0, frame);
-                frame_number_counter = frame_number_counter.wrapping_add(1);
-
-                // Serialize and send
-                for packet in packets {
-                    let serialized = to_bytes(&packet)?;
-                    connection.send_datagram(serialized)?;
-                }
-                println!("Frame fragments sent. Frame number: {}", frame_number_counter)
-            } else {
-                println!("Channel closed, stopping stream loop.");
+            let Some(frame_data) = rx_guard.recv().await else {
+                debug!("Frame channel closed; stopping video sender");
                 break;
+            };
+
+            if frame_data.is_empty() {
+                // The encoder can legally produce no output for a frame (for
+                // example when it skips a frame). There is nothing to send.
+                debug!(frame_number, "Encoder produced an empty frame");
+                frame_number = frame_number.wrapping_add(1);
+                drop(rx_guard);
+                continue;
             }
+
+            let timestamp_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_micros() as u64;
+            let frame = Frame::new(frame_number, timestamp_us, FrameFlags::empty(), frame_data);
+            let datagrams = fragmenter.fragment(&frame)?;
+            let fragment_count = datagrams.len();
+
+            // TODO(M2): pace datagrams and drop stale frames instead of
+            // dumping the whole frame into the QUIC send buffer at once.
+            for datagram in datagrams {
+                connection.send_datagram(datagram)?;
+            }
+
+            debug!(frame_number, bytes = frame.len(), fragment_count, "Sent video frame");
+            frame_number = frame_number.wrapping_add(1);
             drop(rx_guard);
         }
 

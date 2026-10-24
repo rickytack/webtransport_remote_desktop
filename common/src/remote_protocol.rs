@@ -33,29 +33,18 @@ pub struct InputPacket {
     key_down: bool,
 }
 
-// Video header (fixed size)
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct VideoFragmentHeader {
-    pub base: BaseHeader,
-    pub data_size: u32,       // Number of bytes in video data fragment
-    pub frame_number: u32,    // Sequence number
-    pub fragment_number: u32, // number of fragment of current frame
-    pub total_fragments: u32, // Total number of fragments
-    pub timestamp: u64,       // Presentation timestamp
-    pub flags: u32,           // Keyframe, etc.
-}
-
-// Complete video packet (header + variable data)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VideoFragmentPacket {
-    pub header: VideoFragmentHeader,
-    pub video_data: Vec<u8>, // Variable length H.264 data
-}
+/// Upper bound for a decoded control message. Media datagrams use the fixed
+/// header in [`crate::protocol`] and never go through bincode.
+pub const MAX_CONTROL_MESSAGE: usize = 64 * 1024;
 
 pub fn to_bytes<T: Serialize>(packet: &T) -> Result<Vec<u8>, EncodeError> {
     bincode::serde::encode_to_vec(packet, bincode::config::standard())
 }
 
 pub fn from_bytes<T: for<'a> Deserialize<'a>>(data: &[u8]) -> Result<T, DecodeError> {
-    bincode::serde::decode_from_slice(data, bincode::config::standard()).map(|(result, _)| result)
+    bincode::serde::decode_from_slice(
+        data,
+        bincode::config::standard().with_limit::<MAX_CONTROL_MESSAGE>(),
+    )
+    .map(|(result, _)| result)
 }

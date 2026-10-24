@@ -264,7 +264,9 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bytes",
  "serde",
+ "thiserror 2.0.17",
  "tracing-subscriber",
 ]
 
