@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 mod display;
-use display::{CaptureOptions, Display, DisplayFrame};
+mod input;
+use display::{Display, DisplayFrame};
+use input::CaptureOptions;
 
 const USAGE: &str = "\
 Usage: client [OPTIONS]
