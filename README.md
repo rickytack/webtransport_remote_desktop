@@ -27,8 +27,15 @@ Why WebTransport:
 - A new client receives an IDR on connect, and the server refreshes it every
   60 frames. There is no explicit client keyframe request yet.
 - The control stream uses a typed, length-prefixed `Hello`/`Welcome`
-  handshake and a typed input-event schema. Client input capture and server
-  XTest injection are next (M4); keyframe requests and pacing remain M2.
+  handshake. The client captures keyboard, mouse, and scroll input only while
+  its window is active, forwards `Esc` to the remote, and releases held input on
+  focus loss. Keyboard or mouse forwarding can be disabled independently with
+  `--keyboard-capture-disabled` and `--mouse-capture-disabled`.
+  `Ctrl+Shift+Q` (and `Ctrl+Alt+Q` where the desktop delivers Alt) closes the
+  client; the window close button always works.
+- The server currently drains and logs input events to keep the stream open.
+  XTest injection is the next M4 slice (M4c); keyframe requests and pacing
+  remain M2.
 - See [`docs/protocol.md`](docs/protocol.md) for the wire format and limits.
 
 ## Build and test
@@ -51,7 +58,19 @@ RUST_LOG=info cargo run --release -p server
 ```bash
 RUST_LOG=info cargo run --release -p client
 ```
-The client opens a native window. Press `Esc` or close the window to exit.
+The client opens a native window. Close the window or press `Ctrl+Shift+Q`
+(`Ctrl+Alt+Q` also works where the desktop delivers Alt) to exit. `Esc` is sent
+to the remote.
+
+Disable input forwarding selectively:
+```bash
+# View-only: no keyboard or mouse events reach the remote.
+cargo run --release -p client -- --keyboard-capture-disabled --mouse-capture-disabled
+
+# Keyboard only, or mouse only.
+cargo run --release -p client -- --mouse-capture-disabled
+cargo run --release -p client -- --keyboard-capture-disabled
+```
 
 The stream defaults to 1280×720. Override it on the server:
 ```bash

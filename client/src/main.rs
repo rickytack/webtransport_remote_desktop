@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use common::control::{self, ControlMessage, Hello, Welcome};
+use common::control::{self, ControlMessage, Hello, InputEvent, Welcome};
 use common::logging;
 use common::protocol::{FrameFlags, PushOutcome, Reassembler};
 use tracing::error;
@@ -17,16 +17,75 @@ use openh264::formats::YUVSource;
 use openh264::nal_units;
 
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 mod display;
-use display::{Display, DisplayFrame};
+use display::{CaptureOptions, Display, DisplayFrame};
+
+const USAGE: &str = "\
+Usage: client [OPTIONS]
+
+Options:
+  --keyboard-capture-disabled  Do not forward keyboard input
+  --mouse-capture-disabled     Do not forward pointer, button, or scroll input
+  -h, --help                   Print this help
+
+Local quit: Ctrl+Shift+Q or Ctrl+Alt+Q; the window close button always works.
+";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClientOptions {
+    capture: CaptureOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Run(ClientOptions),
+    Help,
+}
+
+fn parse_args() -> Result<Command> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from<I, S>(args: I) -> Result<Command>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut capture = CaptureOptions::default();
+    for arg in args {
+        match arg.as_ref() {
+            "--keyboard-capture-disabled" => capture.keyboard = false,
+            "--mouse-capture-disabled" => capture.mouse = false,
+            "-h" | "--help" => return Ok(Command::Help),
+            other => bail!("unknown argument `{other}`\n\n{USAGE}"),
+        }
+    }
+    Ok(Command::Run(ClientOptions { capture }))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     logging::init_logging();
-    info!("Start");
 
-    let display = Display::spawn()?;
+    let options = match parse_args()? {
+        Command::Run(options) => options,
+        Command::Help => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+    };
+
+    info!("Start");
+    info!(
+        keyboard_capture = options.capture.keyboard,
+        mouse_capture = options.capture.mouse,
+        "Input capture configured"
+    );
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputEvent>();
+    let display = Display::spawn(input_tx, options.capture)?;
 
     let config = ClientConfig::builder().with_bind_default().with_no_cert_validation().build();
 
@@ -46,6 +105,27 @@ async fn main() -> Result<()> {
         }
         other => bail!("expected Welcome, got {other:?}"),
     }
+
+    // Keep the control stream open for input. The server drains these events on
+    // its side of the same reliable stream; M4c adds XTest injection.
+    let (mut control_send, _control_recv) = stream;
+    tokio::spawn(async move {
+        while let Some(event) = input_rx.recv().await {
+            let frame = match ControlMessage::Input(event).encode() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    error!("Failed to encode input event: {error}");
+                    break;
+                }
+            };
+
+            if let Err(error) = control_send.write_all(&frame).await {
+                error!("Failed to send input event: {error}");
+                break;
+            }
+        }
+        let _ = control_send.finish().await;
+    });
 
     info!("Start receiving data from server");
     let handle = tokio::spawn(
@@ -185,4 +265,64 @@ fn decode_h264_data(decoder: &mut Decoder, h264_data: &[u8]) -> Result<Option<De
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_full_capture() {
+        let Command::Run(options) = parse_args_from(Vec::<&str>::new()).expect("parse") else {
+            panic!("expected Run");
+        };
+        assert_eq!(options.capture, CaptureOptions::default());
+        assert!(options.capture.keyboard);
+        assert!(options.capture.mouse);
+    }
+
+    #[test]
+    fn disables_only_keyboard_capture() {
+        let Command::Run(options) =
+            parse_args_from(["--keyboard-capture-disabled"]).expect("parse")
+        else {
+            panic!("expected Run");
+        };
+        assert!(!options.capture.keyboard);
+        assert!(options.capture.mouse);
+    }
+
+    #[test]
+    fn disables_only_mouse_capture() {
+        let Command::Run(options) = parse_args_from(["--mouse-capture-disabled"]).expect("parse")
+        else {
+            panic!("expected Run");
+        };
+        assert!(options.capture.keyboard);
+        assert!(!options.capture.mouse);
+    }
+
+    #[test]
+    fn disables_both_capture_classes() {
+        let Command::Run(options) =
+            parse_args_from(["--keyboard-capture-disabled", "--mouse-capture-disabled"])
+                .expect("parse")
+        else {
+            panic!("expected Run");
+        };
+        assert!(!options.capture.keyboard);
+        assert!(!options.capture.mouse);
+    }
+
+    #[test]
+    fn help_is_reported_without_running() {
+        assert_eq!(parse_args_from(["--help"]).expect("parse"), Command::Help);
+        assert_eq!(parse_args_from(["-h"]).expect("parse"), Command::Help);
+    }
+
+    #[test]
+    fn rejects_unknown_arguments() {
+        let error = parse_args_from(["--mouse-capture"]).expect_err("unknown argument");
+        assert!(error.to_string().contains("unknown argument `--mouse-capture`"));
+    }
 }

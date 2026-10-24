@@ -46,8 +46,16 @@ root window before injecting them. The remaining events are:
 - key press/release using the portable `KeyCode` enum;
 - scroll deltas in notches.
 
-Client capture and server XTest injection are the next M4 slices.
-Keyframe requests, statistics, and datagram pacing remain M2 work.
+The client captures input only while its window is active. `Esc` is forwarded
+to the remote. `Ctrl+Shift+Q` closes the client; `Ctrl+Alt+Q` is also accepted
+when the desktop delivers Alt to the window. Held keys and buttons are released
+when the window loses focus or closes. The client flags
+`--keyboard-capture-disabled` and `--mouse-capture-disabled` suppress the
+corresponding event classes; local quit shortcuts remain active.
+
+M4b is implemented: the client sends typed events on the control stream and the
+server drains them. M4c (XTest injection) and M4d (end-to-end verification) are
+next. Keyframe requests, statistics, and datagram pacing remain M2 work.
 
 Datagram delivery is unreliable: fragments may be lost, duplicated, reordered,
 or arrive after their frame is no longer useful. The protocol therefore aims

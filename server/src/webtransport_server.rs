@@ -81,7 +81,15 @@ impl RemoteDesktopServer {
         let connection = session_request.accept().await?;
         info!("Waiting for data from client...");
 
-        Self::recv_start_conn_data_impl(&connection, stream_size).await?;
+        let input_stream = Self::recv_start_conn_data_impl(&connection, stream_size).await?;
+
+        // M4b stops here: keep reading input so the client's stream does not
+        // reset. M4c replaces this log-only sink with XTest injection.
+        tokio::spawn(async move {
+            if let Err(error) = RemoteDesktopServer::receive_input(input_stream).await {
+                debug!("Input receiver stopped: {error}");
+            }
+        });
 
         // Make sure the first frame this client sees is an IDR, not a P-frame
         // from the middle of the stream.
@@ -110,11 +118,11 @@ impl RemoteDesktopServer {
     async fn recv_start_conn_data_impl(
         connection: &Connection,
         stream_size: (u16, u16),
-    ) -> Result<()> {
-        let mut stream = connection.accept_bi().await?;
+    ) -> Result<wtransport::stream::RecvStream> {
+        let (mut send, mut recv) = connection.accept_bi().await?;
 
         let ControlMessage::Hello(Hello { protocol_version }) =
-            Self::read_control_message(&mut stream.1).await?
+            Self::read_control_message(&mut recv).await?
         else {
             bail!("expected Hello from client");
         };
@@ -129,10 +137,25 @@ impl RemoteDesktopServer {
         let welcome =
             ControlMessage::Welcome(Welcome { protocol_version: control::VERSION, width, height })
                 .encode()?;
-        stream.0.write_all(&welcome).await?;
-        stream.0.finish().await?;
+        send.write_all(&welcome).await?;
+        send.finish().await?;
 
-        Ok(())
+        Ok(recv)
+    }
+
+    async fn receive_input(mut stream: wtransport::stream::RecvStream) -> Result<()> {
+        loop {
+            match Self::read_control_message(&mut stream).await {
+                Ok(ControlMessage::Input(event)) => {
+                    debug!(?event, "Input event");
+                }
+                Ok(other) => bail!("unexpected control message after Welcome: {other:?}"),
+                Err(error) => {
+                    debug!("Input receiver ended: {error}");
+                    return Ok(());
+                }
+            }
+        }
     }
 
     async fn send_videostream_impl(
