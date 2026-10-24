@@ -1,7 +1,7 @@
-# Protocol v1 — media datagrams
+# Protocol v1 — media datagrams and control
 
 This document describes the current wire format implemented in
-`common/src/protocol/`. It is intentionally small: one encoded video frame is
+`common/src/protocol/` and `common/src/control.rs`. It is intentionally small: one encoded video frame is
 split into one or more unreliable WebTransport datagrams, and the receiver
 returns a frame only when every fragment is present and the total length is
 correct.
@@ -11,9 +11,32 @@ correct.
 ```text
 WebTransport (QUIC)
 ├── datagrams      video frame fragments (kind = 1)
-├── control stream handshake, keyframe requests, stats   [planned, M2]
+├── control stream Hello/Welcome, keyframe requests       [partial, M2]
 └── input stream   mouse / keyboard events               [planned, M4]
 ```
+
+## Control stream
+
+The client opens one bidirectional stream and sends a single control frame. The
+first frame must be `Hello`; the server validates it and replies with `Welcome`
+containing the encoded stream size. Video datagrams follow on the same
+connection.
+
+Every control frame has an 8-byte header followed by a bincode payload:
+
+| Offset | Size | Field | Notes |
+|---:|---:|---|---|
+| 0 | 4 | magic | `WTRC` |
+| 4 | 1 | version | currently `1` |
+| 5 | 1 | kind | `1` = Hello, `2` = Welcome |
+| 6 | 2 | payload_len | little-endian, maximum 65535 |
+| 8 | … | payload | bincode |
+
+The receiver reads the header, checks magic/version/kind, reads exactly
+`payload_len` bytes, and rejects trailing bytes. A version mismatch ends the
+handshake with an error rather than guessing compatibility.
+
+Keyframe requests, statistics, and datagram pacing are still planned for M2.
 
 Datagram delivery is unreliable: fragments may be lost, duplicated, reordered,
 or arrive after their frame is no longer useful. The protocol therefore aims
@@ -120,8 +143,8 @@ This is a server-side safety net, not the final protocol. An explicit client
 - Unknown flag bits are preserved and ignored.
 - Future `kind` values can carry audio, cursor, or other media without changing
   the video fragment header.
-- The control-plane handshake is still the placeholder `"HELLO"` exchange and
-  is the next milestone (M2).
+- The control-plane handshake is versioned and length-prefixed; keyframe
+  requests and pacing are the remaining M2 work.
 
 ## Not in v1
 

@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
+use common::control::{self, ControlMessage, Hello, Welcome};
 use common::protocol::{Fragmenter, Frame, FrameFlags};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,12 +12,17 @@ use wtransport::{Connection, Endpoint, Identity, ServerConfig};
 pub struct RemoteDesktopServer {
     rx: watch::Receiver<Option<Arc<Frame>>>,
     force_keyframe: Arc<AtomicBool>,
+    stream_size: (u16, u16),
 }
 
 impl RemoteDesktopServer {
-    pub fn new(rx: watch::Receiver<Option<Arc<Frame>>>, force_keyframe: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        rx: watch::Receiver<Option<Arc<Frame>>>,
+        force_keyframe: Arc<AtomicBool>,
+        stream_size: (u16, u16),
+    ) -> Self {
         println!("Creating RemoteDesktopServer");
-        Self { rx, force_keyframe }
+        Self { rx, force_keyframe, stream_size }
     }
 
     pub async fn listen_for_connections(self) -> Result<(), Box<dyn std::error::Error>> {
@@ -34,12 +40,18 @@ impl RemoteDesktopServer {
             let incoming_session = server.accept().await;
             let rx_clone = self.rx.clone();
             let force_keyframe = Arc::clone(&self.force_keyframe);
+            let stream_size = self.stream_size;
             let id = connection_id;
 
             tokio::spawn(
                 async move {
-                    if let Err(e) =
-                        Self::handle_connection(incoming_session, rx_clone, force_keyframe).await
+                    if let Err(e) = Self::handle_connection(
+                        incoming_session,
+                        rx_clone,
+                        force_keyframe,
+                        stream_size,
+                    )
+                    .await
                     {
                         error!("Connection error: {:?}", e);
                     }
@@ -55,6 +67,7 @@ impl RemoteDesktopServer {
         incoming_session: IncomingSession,
         rx: watch::Receiver<Option<Arc<Frame>>>,
         force_keyframe: Arc<AtomicBool>,
+        stream_size: (u16, u16),
     ) -> Result<()> {
         info!("Waiting for session request...");
         let session_request = incoming_session.await?;
@@ -68,7 +81,7 @@ impl RemoteDesktopServer {
         let connection = session_request.accept().await?;
         info!("Waiting for data from client...");
 
-        Self::recv_start_conn_data_impl(&connection).await?;
+        Self::recv_start_conn_data_impl(&connection, stream_size).await?;
 
         // Make sure the first frame this client sees is an IDR, not a P-frame
         // from the middle of the stream.
@@ -80,17 +93,44 @@ impl RemoteDesktopServer {
         Ok(())
     }
 
-    async fn recv_start_conn_data_impl(connection: &Connection) -> Result<()> {
-        let mut buffer = vec![0; 65536].into_boxed_slice();
-        let mut stream = connection.accept_bi().await?;
-        let bytes_read = stream
-            .1
-            .read(&mut buffer)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Unexpected end of stream"))?;
+    async fn read_control_message(
+        stream: &mut wtransport::stream::RecvStream,
+    ) -> Result<ControlMessage> {
+        let mut header = [0u8; control::HEADER_LEN];
+        stream.read_exact(&mut header).await?;
+        let payload_len = control::payload_len(&header)?;
 
-        let str_data = std::str::from_utf8(&buffer[..bytes_read])?;
-        info!("Received (bi) '{str_data}' from client");
+        let mut frame = vec![0u8; control::HEADER_LEN + payload_len];
+        frame[..control::HEADER_LEN].copy_from_slice(&header);
+        stream.read_exact(&mut frame[control::HEADER_LEN..]).await?;
+
+        Ok(ControlMessage::decode(&frame)?)
+    }
+
+    async fn recv_start_conn_data_impl(
+        connection: &Connection,
+        stream_size: (u16, u16),
+    ) -> Result<()> {
+        let mut stream = connection.accept_bi().await?;
+
+        let ControlMessage::Hello(Hello { protocol_version }) =
+            Self::read_control_message(&mut stream.1).await?
+        else {
+            bail!("expected Hello from client");
+        };
+
+        if protocol_version != control::VERSION {
+            bail!("client control version {protocol_version}, expected {}", control::VERSION);
+        }
+
+        let (width, height) = stream_size;
+        info!(protocol_version, width, height, "Control handshake complete");
+
+        let welcome =
+            ControlMessage::Welcome(Welcome { protocol_version: control::VERSION, width, height })
+                .encode()?;
+        stream.0.write_all(&welcome).await?;
+        stream.0.finish().await?;
 
         Ok(())
     }

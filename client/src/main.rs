@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 
+use common::control::{self, ControlMessage, Hello, Welcome};
 use common::logging;
 use common::protocol::{FrameFlags, PushOutcome, Reassembler};
 use tracing::error;
@@ -31,11 +32,20 @@ async fn main() -> Result<()> {
 
     let connection = Endpoint::client(config)?.connect("https://localhost:4433").await?;
 
-    // TODO(M2): replace this with a typed control handshake.
-    info!("Opening bidirectional stream");
+    info!("Opening control stream");
     let mut stream = connection.open_bi().await?.await?;
-    stream.0.write_all(b"HELLO").await?;
-    stream.0.finish().await?;
+    let hello = ControlMessage::Hello(Hello { protocol_version: control::VERSION }).encode()?;
+    stream.0.write_all(&hello).await?;
+
+    match read_control_message(&mut stream.1).await? {
+        ControlMessage::Welcome(Welcome { protocol_version, width, height }) => {
+            if protocol_version != control::VERSION {
+                bail!("server control version {protocol_version}, expected {}", control::VERSION);
+            }
+            info!(width, height, "Control handshake complete");
+        }
+        other => bail!("expected Welcome, got {other:?}"),
+    }
 
     info!("Start receiving data from server");
     let handle = tokio::spawn(
@@ -47,6 +57,20 @@ async fn main() -> Result<()> {
 
     handle.await?;
     Ok(())
+}
+
+async fn read_control_message(
+    stream: &mut wtransport::stream::RecvStream,
+) -> Result<ControlMessage> {
+    let mut header = [0u8; control::HEADER_LEN];
+    stream.read_exact(&mut header).await?;
+    let payload_len = control::payload_len(&header)?;
+
+    let mut frame = vec![0u8; control::HEADER_LEN + payload_len];
+    frame[..control::HEADER_LEN].copy_from_slice(&header);
+    stream.read_exact(&mut frame[control::HEADER_LEN..]).await?;
+
+    Ok(ControlMessage::decode(&frame)?)
 }
 
 async fn handle_connection(connection: Connection, display: Display) {

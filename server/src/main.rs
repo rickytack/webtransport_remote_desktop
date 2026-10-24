@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
             }
 
             // Start the server (can be async)
-            let server = RemoteDesktopServer::new(rx, force_keyframe);
+            let server = RemoteDesktopServer::new(rx, force_keyframe, (width, height));
             if let Err(e) = server.listen_for_connections().await {
                 eprintln!("Server error: {e}");
             }

@@ -26,8 +26,8 @@ Why WebTransport:
   screen content.
 - A new client receives an IDR on connect, and the server refreshes it every
   60 frames. There is no explicit client keyframe request yet.
-- The control stream is still the `"HELLO"` placeholder; typed handshake,
-  keyframe requests, pacing, and input are next (M2/M4).
+- The control stream uses a typed, length-prefixed `Hello`/`Welcome`
+  handshake. Explicit keyframe requests, pacing, and input are next (M2/M4).
 - See [`docs/protocol.md`](docs/protocol.md) for the wire format and limits.
 
 ## Build and test
